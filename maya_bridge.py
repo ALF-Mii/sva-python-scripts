@@ -51,6 +51,13 @@ def run_file(path: str, call: str = "", timeout: int = TIMEOUT) -> str:
 
     Example: run_file("chandelier_generator.py", "cg.build_chandelier()")
     File path is resolved relative to this bridge file's directory.
+
+    NOTE: the script is exec'd with ONE shared namespace for globals and
+    locals. Maya's commandPort hands us code that already runs inside a
+    try/except, so a plain exec() would put module-level imports into a
+    separate locals dict -- functions defined in the file would then fail
+    with "NameError: name 'x' is not defined". Sharing one dict keeps the
+    file behaving like a normal Python script.
     """
     import pathlib
     p = pathlib.Path(path)
@@ -59,9 +66,13 @@ def run_file(path: str, call: str = "", timeout: int = TIMEOUT) -> str:
     p = p.resolve()
     # Use forward slashes - safe inside Maya python strings on Windows.
     fwd = p.as_posix()
-    code = f"exec(open({fwd!r}).read())\n"
+    code = (
+        "_ns = {'__name__': '__main__', '__file__': " + repr(fwd) + "}\n"
+        "exec(compile(open(" + repr(fwd) + ").read(), " + repr(fwd) +
+        ", 'exec'), _ns, _ns)\n"
+    )
     if call:
-        code += call + "\n"
+        code += "exec(" + repr(call) + ", _ns)\n"
     # Wrap so tracebacks come back over the socket.
     wrapped = (
         "import traceback\n"

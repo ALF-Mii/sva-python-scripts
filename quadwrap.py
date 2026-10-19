@@ -149,8 +149,12 @@ def _sanitize_settings(s):
         s.get("vertex_target", out["vertex_target"]), 5000, 100, 200000)
     out["snap_offset"] = _clamp_float(
         s.get("snap_offset", out["snap_offset"]), 0.0, -0.1, 0.1)
+    # NOTE: Maya's shrinkWrap ".projection" enum has exactly 5 entries
+    # (0 Toward Inner, 1 Toward Center, 2 Parallel To Axes,
+    #  3 Vertex Normals, 4 Closest). "Closest if no hit" is NOT a mode -
+    # it is the separate ".closestIfNoIntersection" boolean.
     out["projection_mode"] = _clamp_int(
-        s.get("projection_mode", out["projection_mode"]), 4, 0, 5)
+        s.get("projection_mode", out["projection_mode"]), 4, 0, 4)
     out["bidirectional"] = 1 if s.get("bidirectional", 1) else 0
     out["closest_if_no_intersection"] = 1 if s.get(
         "closest_if_no_intersection", 1) else 0
@@ -982,14 +986,21 @@ def show_ui():
                 command=lambda *_: _ui_fit())
     CTRL["mode_menu"] = cmds.optionMenuGrp("qwMode", label="Projection Mode",
                                           changeCommand=lambda v: _ui_mode_changed(v))
+    # Maya's shrinkWrap ".projection" has exactly 5 enum entries.
     for lbl in ("Toward Inner", "Toward Center", "Parallel", "Vertex Normals",
-                "Closest", "Closest if no hit"):
+                "Closest"):
         cmds.menuItem(label=lbl)
     try:
         cmds.optionMenuGrp("qwMode", edit=True,
                            select=int(_SETTINGS["projection_mode"]) + 1)
     except Exception:  # noqa: BLE001
         pass
+    cmds.setParent("..")
+    CTRL["cino"] = cmds.checkBoxGrp(
+        "qwCino", label="Closest If No Intersection",
+        value1=bool(_SETTINGS["closest_if_no_intersection"]),
+        changeCommand=lambda *_: _ui_cino_changed(
+            cmds.checkBoxGrp("qwCino", q=True, value1=True)))
     cmds.setParent("..")
     cmds.setParent("..")
 
@@ -1123,6 +1134,8 @@ def _ui_setting_changed(key, value):
     try:
         _SETTINGS[key] = value
         _SETTINGS["preset"] = "Custom"
+        # clamp to legal ranges so the UI can never write an invalid value
+        _SETTINGS.update(_sanitize_settings(_SETTINGS))
         # live-update fit node if present
         node = _CURRENT.get("sw_node")
         if node and cmds.objExists(node):
@@ -1134,13 +1147,18 @@ def _ui_setting_changed(key, value):
 
 
 def _ui_mode_changed(value):
-    # map menu label -> index
+    # map menu label -> index (must match Maya's 5-entry shrinkWrap enum)
     mapping = {
         "Toward Inner": 0, "Toward Center": 1, "Parallel": 2,
-        "Vertex Normals": 3, "Closest": 4, "Closest if no hit": 5,
+        "Vertex Normals": 3, "Closest": 4,
     }
     idx = mapping.get(value, _SETTINGS["projection_mode"])
     _ui_setting_changed("projection_mode", idx)
+
+
+def _ui_cino_changed(value):
+    """'Closest If No Intersection' is a separate boolean on shrinkWrap."""
+    _ui_setting_changed("closest_if_no_intersection", 1 if value else 0)
 
 
 def _ui_preset_selected(value):

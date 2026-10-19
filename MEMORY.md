@@ -1,9 +1,10 @@
-# Session Memory — 2026-10-13 (updated 2026-10-13)
+# Session Memory — 2026-10-13 (updated 2026-10-19)
 
 ## Project
 - Repo: https://github.com/ALF-Mii/sva-python-scripts.git branch main
 - Working dir: C:\Users\alfre\Documents\sva-python-scripts
-- GitHub CLI (`gh`) is **not logged in**. Git push still pending — first action next session.
+- Last commit `a3c0936` **is pushed** to origin/main. `gh` CLI is still not
+  logged in, but plain `git push` works — no need for `gh`.
 
 ## Machine / Maya
 - Windows, Maya 2027 at C:\Program Files\Autodesk\Maya2027\bin
@@ -35,10 +36,23 @@ Works:
 - Deform test: bind committed cage to 2 joints and bend 45°
 
 Not done yet:
-- Real high-poly test asset (currently primitive proxies)
+- Real high-poly test asset (currently primitive proxies) — **nothing usable
+  on disk yet**
 - Auto-Ring axis/count defaults need tuning on a real asset
 - Optional: curvature-adaptive density, freehand curve drawing, ribbon helper
 - PolyRetopo benchmark comparison narrative for the demo
+
+## Fixes applied 2026-10-19
+- Removed the invalid "Closest if no hit" item from the Projection Mode
+  dropdown (Maya's enum has 5 entries). Added a real **Closest If No
+  Intersection** checkbox bound to `.closestIfNoIntersection`.
+- `_sanitize_settings` now clamps `projection_mode` to 0–4 (was 0–5).
+- `_ui_setting_changed` re-sanitizes on every change, so the UI can't write
+  an illegal value.
+- `maya_bridge.run_file` now execs scripts in one shared namespace so
+  module-level imports are visible inside functions.
+- Verified live: cage r=6 → snaps to r=5 sculpt across all 5 projection modes;
+  preview ghost and commit both sit on the surface; heat map + deform OK.
 
 ## Decisions made
 - Projection via Shrink Wrap deformer (Isaac) instead of custom code.
@@ -55,10 +69,25 @@ Not done yet:
 - In Maya standalone, `cmds.xform("mesh.vtx[*]", ...)` returns flattened positions.
 - `_shape_of()` returns the first non-intermediate mesh shape.
 - Keep classes/projects as one self-contained .py per tool (matches class style).
+- **Maya's shrinkWrap `.projection` enum has only 5 values** (0 Toward Inner,
+  1 Toward Center, 2 Parallel To Axes, 3 Vertex Normals, 4 Closest). Setting
+  5+ raises "Cannot set the attribute past its maximum value of 4".
+  "Closest if no hit" is NOT a mode — it is the separate
+  `.closestIfNoIntersection` boolean.
+- **A floating cage over a flat target makes shrinkWrap look broken.** Use a
+  cage that overlaps the sculpt (e.g. r=6 cage over r=5 sculpt) when testing;
+  then all 5 projection modes snap correctly.
+- After editing `quadwrap.py`, the running Maya still has the old module.
+  Reload it: `importlib.reload(quadwrap)` before testing.
+- `run_file` scripts used to lose module-level imports inside functions
+  (separate globals/locals). Fixed 2026-10-19 — the file now execs with one
+  shared namespace, so `import math` at the top works inside functions.
 
 ## Next session first steps
-1. Run `gh auth login`, then `git add -A && git commit -m "Add QuadWrap ..."` and `git push`.
-2. Confirm `python maya_bridge.py ping` → ALIVE.
-3. Load a real high-poly sculpt (FBX/OBJ) and test Fit, presets, heat map, deform.
-4. Tune Auto-Ring on that asset; capture demo material.
-5. If time permits: curvature preview + ribbon helper.
+1. Confirm `python maya_bridge.py ping` → ALIVE (Maya must be running; the
+   `userSetup.py` in `Documents\maya\2027\scripts` opens the port on launch).
+2. Run the smoke test: `python maya_bridge.py run_file <qw_smoke.py>`.
+3. Build/import a real high-poly sculpt (FBX/OBJ) — none exists on disk yet —
+   and test Fit / presets / heat map / deform against it.
+4. PolyRetopo benchmark vs QuadWrap on that asset → numbers for the demo.
+5. Curvature-adaptive density (the last instructor suggestion not yet built).
