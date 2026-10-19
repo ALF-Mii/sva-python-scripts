@@ -5,6 +5,21 @@
 - Working dir: C:\Users\alfre\Documents\sva-python-scripts
 - Last commit `a3c0936` **is pushed** to origin/main. `gh` CLI is still not
   logged in, but plain `git push` works — no need for `gh`.
+- **Submission repo:** https://github.com/ALF-Mii/pfa-week06.git (course repo
+  "pfa", week 06 / midterm). QuadWrap was uploaded there 2026-10-19 with a
+  full README (install/run, what works, what doesn't, peer-run section).
+  It also holds the test assets `TARGET_MESH.fbx` (5,077 faces) and
+  `CAGE_MESH.fbx` (400 faces) — **use these for real testing**, they are the
+  only real meshes on the machine.
+- Peer-run section in that README is a DRAFT — the user must replace the
+  classmate's name and the three sentences with what they actually said.
+
+## Verified on the real FBX assets (2026-10-19)
+- Cage max deviation from target: **7.0922 before fit → 0.0000 after fit**
+- Commit preserved topology exactly: 400 faces / 382 verts / 0 non-manifold
+- Heat map, deform test, guide strip, auto-ring, mirror all OK on real assets
+- Maya's shrinkWrap `.projection` enum has only 5 values; "Closest if no hit"
+  is a separate boolean, not a mode
 
 ## Machine / Maya
 - Windows, Maya 2027 at C:\Program Files\Autodesk\Maya2027\bin
