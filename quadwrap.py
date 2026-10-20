@@ -459,8 +459,43 @@ def _safe_delete_node(name):
         return False
 
 
+# Nodes the deform test creates. Kept in one place so cleanup is never missed.
+DEFORM_NODES = ("qw_test_skin", "qw_test_joint_b", "qw_test_joint_a")
+
+
+def _clear_deform_rig():
+    """Remove the deform-test skinCluster and joints if they exist.
+
+    The skinCluster goes first so the mesh stops being weighted before the
+    joints disappear.
+    """
+    removed = False
+    for n in DEFORM_NODES:
+        if cmds.objExists(n):
+            if _safe_delete_node(n):
+                removed = True
+    return removed
+
+
+def _prune_registry():
+    """Drop tracked nodes that no longer exist.
+
+    Maya's own undo can remove a node we still have on our list (undoing a
+    commit, for example). Pruning keeps the stats and the heat map from
+    pointing at meshes that are gone.
+    """
+    for name in list(CREATED_GUIDES):
+        if not cmds.objExists(name):
+            CREATED_GUIDES.remove(name)
+            GUIDE_META.pop(name, None)
+    for name in list(COMMITTED):
+        if not cmds.objExists(name):
+            COMMITTED.remove(name)
+
+
 def undo_last():
     _require_maya()
+    _prune_registry()
     # pop guides first
     while ACTION_STACK:
         token = ACTION_STACK.pop()
@@ -479,6 +514,11 @@ def undo_last():
         if kind == "fit":
             detach_fit()
             return True
+        if kind == "deform":
+            # remove the test rig (joints + skin) instead of the mesh
+            if _clear_deform_rig():
+                return True
+            continue
     # fallback: last committed
     if COMMITTED:
         name = COMMITTED.pop()
@@ -492,6 +532,9 @@ def clear_all():
     _require_maya()
     cmds.undoInfo(openChunk=True)
     try:
+        # the deform-test rig first: its joints are not children of the
+        # committed mesh, so they would otherwise be left behind
+        _clear_deform_rig()
         for name in list(CREATED_GUIDES):
             _safe_delete_node(name)
         CREATED_GUIDES[:] = []
@@ -655,6 +698,7 @@ def preview():
 
 def commit():
     _require_maya()
+    _prune_registry()
     cage = _CURRENT.get("cage")
     if not cage or not cmds.objExists(cage):
         cmds.warning("QuadWrap: fit a cage first.")
@@ -706,6 +750,7 @@ def count_non_manifold(mesh):
 
 def get_stats(mesh=None):
     _require_maya()
+    _prune_registry()
     if mesh is None:
         mesh = _CURRENT.get("cage") or _CURRENT.get("target")
     if not mesh or not cmds.objExists(mesh):
@@ -733,6 +778,7 @@ def get_stats(mesh=None):
 # ---------------------------------------------------------------------------
 def _resolve_heat_inputs(mesh, target, clamp):
     _require_maya()
+    _prune_registry()
     if mesh is None:
         if COMMITTED:
             mesh = COMMITTED[-1]
@@ -879,14 +925,27 @@ def deform_test(mesh=None):
         cx = (bb[0] + bb[3]) / 2.0
         cy = (bb[1] + bb[4]) / 2.0
         cz = (bb[2] + bb[5]) / 2.0
-        hx = bb[3] - bb[0]
-        hy = bb[4] - bb[1]
-        hz = bb[5] - bb[2]
         # place joints at lower and upper regions
-        j1 = cmds.joint(name="qw_test_joint_a",
-                        position=(cx, bb[1], cz))
-        j2 = cmds.joint(name="qw_test_joint_b",
-                        position=(cx, bb[4], cz))
+        # Maya parents a new joint under whatever is selected, which would
+        # leave the rig behind when "Clear All" deletes the mesh. Unparent
+        # them to the world so the rig is ours to clean up.
+        j1 = cmds.joint(name="qw_test_joint_a", position=(cx, bb[1], cz))
+        if cmds.listRelatives(j1, parent=True):
+            try:
+                cmds.parent(j1, world=True)
+            except Exception:  # noqa: BLE001
+                pass
+        j2 = cmds.joint(name="qw_test_joint_b", position=(cx, bb[4], cz))
+        if cmds.listRelatives(j2, parent=True):
+            try:
+                cmds.parent(j2, world=True)
+            except Exception:  # noqa: BLE001
+                pass
+        # keep the chain: bending the upper joint bends the mesh
+        try:
+            cmds.parent(j2, j1)
+        except Exception:  # noqa: BLE001
+            pass
         # bind
         try:
             skin = cmds.skinCluster(j1, j2, mesh, name="qw_test_skin",
@@ -908,6 +967,7 @@ def deform_test(mesh=None):
         _set_status("Deform test applied (rotate joint to inspect loops).")
         cmds.inViewMessage(statusMessage="QuadWrap deform test: bend qw_test_joint_b",
                           fade=True)
+        ACTION_STACK.append("deform:rig")
         return True
     except Exception as exc:  # noqa: BLE001
         cmds.warning("QuadWrap: deform test failed: {}".format(exc))
@@ -933,7 +993,7 @@ def show_ui():
     if cmds.window(win, exists=True):
         cmds.deleteUI(win)
     cmds.window(win, title="QuadWrap - Semi-Auto Retopology",
-                widthHeight=(420, 620), sizeable=True)
+                widthHeight=(460, 640), sizeable=True)
     cmds.scrollLayout("qwScroll", childResizable=True)
     cmds.columnLayout("qwCol", adjustableColumn=True, rowSpacing=4)
 
@@ -981,10 +1041,11 @@ def show_ui():
         changeCommand=lambda *_: _ui_setting_changed(
             "snap_offset",
             cmds.floatFieldGrp("qwSnap", q=True, value1=True)))
-    cmds.rowLayout(numberOfColumns=2, columnWidth2=(120, 280))
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(130, 260))
     cmds.button(label="Fit to Surface",
                 command=lambda *_: _ui_fit())
     CTRL["mode_menu"] = cmds.optionMenuGrp("qwMode", label="Projection Mode",
+                                          columnWidth2=(110, 150),
                                           changeCommand=lambda v: _ui_mode_changed(v))
     # Maya's shrinkWrap ".projection" has exactly 5 enum entries.
     for lbl in ("Toward Inner", "Toward Center", "Parallel", "Vertex Normals",
@@ -1005,8 +1066,9 @@ def show_ui():
     cmds.setParent("..")
 
     cmds.frameLayout(label="Presets", collapsable=True, marginWidth=8)
-    cmds.rowLayout(numberOfColumns=2, columnWidth2=(160, 240))
+    cmds.rowLayout(numberOfColumns=1, adjustableColumn=1)
     CTRL["preset_menu"] = cmds.optionMenuGrp("qwPreset", label="Preset",
+        columnWidth2=(60, 250),
         changeCommand=lambda v: _ui_preset_selected(v))
     for name in list(PRESETS.keys()) + list(_CUSTOM_PRESETS.keys()):
         cmds.menuItem(label=name)
@@ -1017,6 +1079,7 @@ def show_ui():
             cmds.optionMenuGrp("qwPreset", edit=True, select=idx)
         except Exception:  # noqa: BLE001
             pass
+    cmds.setParent("..")
     cmds.button(label="Save Current Settings",
                 command=lambda *_: _ui_save_preset())
     cmds.setParent("..")

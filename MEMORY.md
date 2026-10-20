@@ -77,6 +77,26 @@ Not done yet:
 - Verified live: cage r=6 → snaps to r=5 sculpt across all 5 projection modes;
   preview ghost and commit both sit on the surface; heat map + deform OK.
 
+## Fixes applied 2026-10-20 (from Fayth's peer run)
+- **FBX import failed** with `Invalid file type specified: FBX` — Maya's FBX
+  plugin isn't loaded by default. The pfa-week06 README now runs
+  `cmds.loadPlugin("fbxmaya")` first, and a troubleshooting row was added.
+- **Clear All left `qw_test_joint_a` behind** after a Deform Test. Root cause:
+  Maya parents a new joint under whatever is selected, so the rig wasn't ours
+  to delete. Fix: unparent the joints to the world, register the rig on
+  ACTION_STACK, and remove it in `clear_all()` / `undo_last()`
+  (`_clear_deform_rig()`).
+- **Preset dropdown too narrow** (showed only "Pro") — the menu shared a row
+  with the Save button. The preset menu now gets its own full-width row
+  (`columnWidth2=(60, 250)`), the window is 460 wide, and the mode menu got
+  `columnWidth2=(110, 150)`. "Hard-Surface" fits — checked on screen.
+- **The README wrongly claimed Ctrl+Z can't undo a commit.** It can — commit
+  is wrapped in one undo chunk. Claim corrected, and `_prune_registry()` now
+  drops tracked nodes that Maya's undo removed, so the stats never point at a
+  deleted mesh.
+- Fayth's numbers reproduced exactly: 7.09 → 0.00, 3.5461 at strength 0.5
+  (she said 3.55), 400 faces / 382 verts / 0 non-manifold.
+
 ## Decisions made
 - Projection via Shrink Wrap deformer (Isaac) instead of custom code.
 - Guide strips created from selected vertex rows (not freehand drawing).
