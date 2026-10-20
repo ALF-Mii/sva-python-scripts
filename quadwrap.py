@@ -47,6 +47,7 @@ SETTINGS_VERSION = 2
 CREATED_GUIDES = []      # transform names we created (guide strips / curves)
 GUIDE_META = {}          # name -> dict metadata
 COMMITTED = []           # committed cage transform names
+CREATED_CAGES = []       # base cages we generated
 ACTION_STACK = []        # names for "Undo Last": type-prefixed e.g. "guide:xxx"
 
 _CURRENT = {
@@ -73,6 +74,7 @@ _DEFAULT_SETTINGS = {
     "closest_if_no_intersection": 1,
     "target_smooth_level": 0,
     "mirror_axis": "X",
+    "base_cage": "Prop",
 }
 
 PRESETS = {
@@ -164,6 +166,8 @@ def _sanitize_settings(s):
         s.get("target_smooth_level", out["target_smooth_level"]), 0, 0, 4)
     axis = str(s.get("mirror_axis", out["mirror_axis"])).upper()
     out["mirror_axis"] = axis if axis in ("X", "Y", "Z") else "X"
+    base = s.get("base_cage", out["base_cage"])
+    out["base_cage"] = base if base in BASE_CAGE_KINDS else "Prop"
     preset = s.get("preset", out["preset"])
     out["preset"] = preset if preset in list(PRESETS.keys()) + ["Custom"] else "Prop"
     return out
@@ -509,6 +513,150 @@ def mirror_guide(guide=None, axis=None, blend=None):
     return dup
 
 
+# Base cage types the tool can generate for you.
+BASE_CAGE_KINDS = ("Human", "Prop", "Hard-Surface")
+
+# ---------------------------------------------------------------------------
+# Base cages - starting points so you do not need a cage to begin with
+# ---------------------------------------------------------------------------
+# Each base cage is generated procedurally, so the tool stays a single file
+# and never needs external assets. They are deliberately simple: a starting
+# blockout to shrink wrap and then cut down, not a finished cage.
+
+# width / depth profile of the human blockout, by height fraction (0 = feet)
+_HUMAN_PROFILE = [
+    (0.00, 0.30, 0.28),   # feet
+    (0.08, 0.30, 0.26),   # ankles
+    (0.45, 0.34, 0.30),   # legs
+    (0.52, 0.42, 0.34),   # hips
+    (0.62, 0.33, 0.28),   # waist
+    (0.72, 0.38, 0.32),   # chest
+    (0.80, 0.52, 0.30),   # shoulders / arms
+    (0.86, 0.17, 0.17),   # neck
+    (0.91, 0.21, 0.23),   # head
+    (1.00, 0.21, 0.23),
+]
+
+
+def _profile_at(fraction):
+    """Width and depth of the human blockout at a given height."""
+    pts = _HUMAN_PROFILE
+    if fraction <= pts[0][0]:
+        return pts[0][1], pts[0][2]
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        if a[0] <= fraction <= b[0]:
+            span = (b[0] - a[0]) or 1.0
+            t = (fraction - a[0]) / span
+            return (a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+    return pts[-1][1], pts[-1][2]
+
+
+def _move_verts_to_profile(shape):
+    """Reshape a unit box into the tapered human blockout.
+
+    Mesh vertices have no per-vertex translate attribute, so each one is
+    moved with cmds.xform.
+    """
+    try:
+        flat = cmds.xform(shape + ".vtx[*]", query=True, translation=True) or []
+    except Exception:  # noqa: BLE001
+        return False
+    n = len(flat) // 3
+    if n < 8:
+        return False
+    for i in range(n):
+        x, y, z = flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]
+        # y runs -0.5 .. 0.5 on a unit cube
+        f = max(0.0, min(1.0, y + 0.5))
+        w, d = _profile_at(f)
+        nx, nz = x * w, z * d
+        # open a gap between the legs below the hips
+        if f < 0.50 and abs(x) < 0.12:
+            nx = 0.045 if x >= 0 else -0.045
+        try:
+            cmds.xform("{}.vtx[{}]".format(shape, i), translation=(nx, y, nz))
+        except Exception:  # noqa: BLE001
+            return False
+    return True
+
+
+def _target_bounds():
+    """(centre, width, height, depth) of the loaded target, or None."""
+    target = _CURRENT.get("target")
+    if not target or not cmds.objExists(target):
+        return None
+    try:
+        bb = cmds.exactWorldBoundingBox(target)
+    except Exception:  # noqa: BLE001
+        return None
+    centre = ((bb[0] + bb[3]) / 2.0, (bb[1] + bb[4]) / 2.0, (bb[2] + bb[5]) / 2.0)
+    size = (bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2])
+    return centre, size
+
+
+def create_base_cage(kind=None):
+    """Build a starting cage sized to the loaded target.
+
+    Returns the new cage transform, or None. The cage is remembered as the
+    current cage, so Fit to Surface works without picking anything.
+    """
+    _require_maya()
+    if kind is None:
+        kind = _SETTINGS.get("base_cage", "Prop")
+    if kind not in BASE_CAGE_KINDS:
+        kind = "Prop"
+
+    bounds = _target_bounds()
+    if bounds is None:
+        cmds.warning("QuadWrap: load a target mesh first so the cage can fit it.")
+        return None
+    centre, size = bounds
+
+    cmds.undoInfo(openChunk=True)
+    try:
+        if kind == "Human":
+            cage = cmds.polyCube(w=1, h=1, d=1, sx=4, sy=10, sz=2,
+                                 name="qw_base_human")[0]
+            shape = _shape_of(cage)
+            if shape:
+                _move_verts_to_profile(shape)
+            # sized to the target's height and centred on it
+            scale = size[1] * 0.92
+            cmds.xform(cage, scale=(scale, scale, scale))
+            cmds.xform(cage, worldSpace=True, translation=centre)
+        elif kind == "Hard-Surface":
+            cage = cmds.polyCube(w=1, h=1, d=1, name="qw_base_hardsurface")[0]
+            try:
+                cmds.polyBevel3(cage, offset=0.12, segments=1, ch=False)
+            except Exception:  # noqa: BLE001
+                pass
+            s = 0.9
+            cmds.xform(cage, scale=(size[0] * s, size[1] * s, size[2] * s))
+            cmds.xform(cage, worldSpace=True, translation=centre)
+        else:  # Prop
+            cage = cmds.polyCube(w=1, h=1, d=1, sx=2, sy=2, sz=2,
+                                 name="qw_base_prop")[0]
+            s = 0.9
+            cmds.xform(cage, scale=(size[0] * s, size[1] * s, size[2] * s))
+            cmds.xform(cage, worldSpace=True, translation=centre)
+
+        # remember it so Fit works without a manual selection
+        _CURRENT["cage"] = cage
+        _CURRENT["cage_shape"] = _shape_of(cage)
+        if cage not in CREATED_CAGES:
+            CREATED_CAGES.append(cage)
+        _set_status("Created a {} base cage ({}).".format(
+            kind, cage))
+        return cage
+    except Exception as exc:  # noqa: BLE001
+        cmds.warning("QuadWrap: could not create the base cage: {}".format(exc))
+        traceback.print_exc()
+        return None
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
 def _safe_delete_node(name):
     if not name or not cmds.objExists(name):
         return False
@@ -603,6 +751,10 @@ def clear_all():
             _safe_delete_node(name)
         COMMITTED[:] = []
         ACTION_STACK[:] = []
+        # base cages we generated
+        for name in list(CREATED_CAGES):
+            _safe_delete_node(name)
+        CREATED_CAGES[:] = []
         # remove live fit on cage
         if _CURRENT.get("sw_node") and cmds.objExists(_CURRENT["sw_node"]):
             try:
@@ -634,8 +786,17 @@ def fit_to_surface():
     cage = None
     if sel:
         cage = _resolve_transform(sel[0])
-    if not cage or cage == target:
-        cmds.warning("QuadWrap: select a different mesh to use as the cage.")
+    if cage == target:
+        cage = None
+    if not cage:
+        # fall back to the cage we already know about, so the tool works
+        # without the user having to pick one every time
+        known = _CURRENT.get("cage")
+        if known and cmds.objExists(known) and known != target:
+            cage = known
+    if not cage:
+        cmds.warning("QuadWrap: no cage to fit. Use 'Create Base Cage', "
+                      "or select a cage mesh.")
         return None
     cage_shape = _shape_of(cage)
     target_shape = _CURRENT.get("target_shape") or _shape_of(target)
@@ -1053,56 +1214,72 @@ def show_ui():
     if cmds.window(win, exists=True):
         cmds.deleteUI(win)
     cmds.window(win, title="QuadWrap - Semi-Auto Retopology",
-                widthHeight=(460, 640), sizeable=True)
+                widthHeight=(520, 700), sizeable=True)
     cmds.scrollLayout("qwScroll", childResizable=True)
     cmds.columnLayout("qwCol", adjustableColumn=True, rowSpacing=4)
 
-    cmds.frameLayout(label="Mesh", collapsable=True, marginWidth=8)
-    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(120, 280))
-    cmds.button(label="Load Target Mesh", command=lambda *_: _ui_load_target())
-    CTRL["target_lbl"] = cmds.text(label="target: (none)", align="left")
+    # ------------------------------------------------------------------
+    # Getting started - the three steps, in order
+    # ------------------------------------------------------------------
+    cmds.frameLayout("qwHelp", label="Getting started", collapsable=True,
+                     marginWidth=8)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
+    cmds.text(label="1.  Select your sculpt, then Load Target Mesh.",
+              align="left")
+    cmds.text(label="2.  Make a cage: Create Base Cage, or pick your own.",
+              align="left")
+    cmds.text(label="3.  Fit to Surface, then Preview, then Commit.",
+              align="left")
     cmds.setParent("..")
-    cmds.text(label="Guide: select vertices -> Draw Strip", font="smallPlainLabelFont")
-    cmds.text(label="Fit: load target, then select cage mesh -> Fit to Surface",
-              font="smallPlainLabelFont")
+    cmds.button(label="Hide these steps", height=22,
+                command=lambda *_: cmds.frameLayout("qwHelp", edit=True,
+                                                    collapse=True))
     cmds.setParent("..")
 
-    cmds.frameLayout(label="Guide Strips", collapsable=True, marginWidth=8)
-    cmds.rowLayout(numberOfColumns=4, columnWidth4=(90, 90, 90, 90))
-    cmds.button(label="Draw Strip", command=lambda *_: _ui_draw_strip())
-    cmds.button(label="Close Loop", command=lambda *_: _ui_close_loop())
-    cmds.button(label="Auto-Ring", command=lambda *_: _ui_auto_ring())
-    cmds.button(label="Mirror", command=lambda *_: _ui_mirror())
+    # ------------------------------------------------------------------
+    # 1 - Target
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="1  Target", collapsable=True, marginWidth=8)
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(170, 320))
+    cmds.button(label="Load Target Mesh", height=28,
+                command=lambda *_: _ui_load_target())
+    CTRL["target_lbl"] = cmds.text(label="no target yet", align="left")
     cmds.setParent("..")
     cmds.setParent("..")
 
-    cmds.frameLayout(label="Fit to Surface", collapsable=True, marginWidth=8)
-    CTRL["proj"] = cmds.floatSliderGrp(
-        "qwProj", label="Projection Strength", field=True, minValue=0.0,
-        maxValue=1.0, value=_SETTINGS["projection_strength"], precision=2,
-        changeCommand=lambda v: _ui_setting_changed("projection_strength", float(v)))
-    CTRL["density"] = cmds.floatSliderGrp(
-        "qwDensity", label="Density", field=True, minValue=0.1,
-        maxValue=5.0, value=_SETTINGS["density"], precision=2,
-        changeCommand=lambda v: _ui_setting_changed("density", float(v)))
-    CTRL["sym"] = cmds.floatSliderGrp(
-        "qwSym", label="Symmetry Blend", field=True, minValue=0.0,
-        maxValue=1.0, value=_SETTINGS["symmetry_blend"], precision=2,
-        changeCommand=lambda v: _ui_setting_changed("symmetry_blend", float(v)))
-    CTRL["targetn"] = cmds.intFieldGrp(
-        "qwVertexTarget", label="Vertex Target", numberOfFields=1,
-        value1=_SETTINGS["vertex_target"],
-        changeCommand=lambda *_: _ui_setting_changed(
-            "vertex_target",
-            cmds.intFieldGrp("qwVertexTarget", q=True, value1=True)))
-    CTRL["snap"] = cmds.floatFieldGrp(
-        "qwSnap", label="Snap Offset/Tolerance", numberOfFields=1,
-        value1=_SETTINGS["snap_offset"],
-        changeCommand=lambda *_: _ui_setting_changed(
-            "snap_offset",
-            cmds.floatFieldGrp("qwSnap", q=True, value1=True)))
-    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(130, 260))
-    cmds.button(label="Fit to Surface",
+    # ------------------------------------------------------------------
+    # 2 - Cage
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="2  Cage", collapsable=True, marginWidth=8)
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(170, 320))
+    CTRL["base_menu"] = cmds.optionMenuGrp(
+        "qwBase", label="", columnWidth2=(10, 150),
+        changeCommand=lambda v: _ui_base_cage_changed(v))
+    for name in BASE_CAGE_KINDS:
+        cmds.menuItem(label=name)
+    try:
+        cmds.optionMenuGrp("qwBase", edit=True,
+                           select=BASE_CAGE_KINDS.index(_SETTINGS["base_cage"]) + 1)
+    except Exception:  # noqa: BLE001
+        pass
+    cmds.button(label="Create Base Cage", height=28,
+                command=lambda *_: _ui_create_base_cage())
+    cmds.setParent("..")
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(170, 320))
+    cmds.button(label="Use Selected as Cage", height=24,
+                command=lambda *_: _ui_use_selected_cage())
+    CTRL["cage_lbl"] = cmds.text(label="no cage yet", align="left")
+    cmds.setParent("..")
+    cmds.text(label="Base cages are blockouts to shrink wrap, then cut down.",
+              font="smallPlainLabelFont", align="left")
+    cmds.setParent("..")
+
+    # ------------------------------------------------------------------
+    # 3 - Fit
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="3  Fit", collapsable=True, marginWidth=8)
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(170, 320))
+    cmds.button(label="Fit to Surface", height=28,
                 command=lambda *_: _ui_fit())
     CTRL["mode_menu"] = cmds.optionMenuGrp("qwMode", label="Projection Mode",
                                           columnWidth2=(110, 150),
@@ -1117,15 +1294,63 @@ def show_ui():
     except Exception:  # noqa: BLE001
         pass
     cmds.setParent("..")
+    CTRL["proj"] = cmds.floatSliderGrp(
+        "qwProj", label="Projection Strength", field=True, minValue=0.0,
+        maxValue=1.0, value=_SETTINGS["projection_strength"], precision=2,
+        changeCommand=lambda v: _ui_setting_changed("projection_strength", float(v)))
+    CTRL["snap"] = cmds.floatFieldGrp(
+        "qwSnap", label="Snap Offset/Tolerance", numberOfFields=1,
+        value1=_SETTINGS["snap_offset"],
+        changeCommand=lambda *_: _ui_setting_changed(
+            "snap_offset",
+            cmds.floatFieldGrp("qwSnap", q=True, value1=True)))
     CTRL["cino"] = cmds.checkBoxGrp(
         "qwCino", label="Closest If No Intersection",
         value1=bool(_SETTINGS["closest_if_no_intersection"]),
         changeCommand=lambda *_: _ui_cino_changed(
             cmds.checkBoxGrp("qwCino", q=True, value1=True)))
     cmds.setParent("..")
+
+    # ------------------------------------------------------------------
+    # 4 - Check the result
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="4  Check the result", collapsable=True, marginWidth=8)
+    cmds.rowLayout(numberOfColumns=2, columnWidth2=(245, 245))
+    cmds.button(label="Heat Map (deviation)", width=235, height=28,
+                command=lambda *_: _ui_heat_map())
+    cmds.button(label="Deform Test (skin)", width=235, height=28,
+                command=lambda *_: _ui_deform_test())
+    cmds.setParent("..")
     cmds.setParent("..")
 
-    cmds.frameLayout(label="Presets", collapsable=True, marginWidth=8)
+    # ------------------------------------------------------------------
+    # 5 - Guide strips (optional)
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="5  Guide strips (optional)", collapsable=True,
+                     collapse=True, marginWidth=8)
+    cmds.rowLayout(numberOfColumns=4, adjustableColumn=4, columnWidth4=(120, 120, 120, 120))
+    cmds.button(label="Draw Strip", command=lambda *_: _ui_draw_strip())
+    cmds.button(label="Close Loop", command=lambda *_: _ui_close_loop())
+    cmds.button(label="Auto-Ring", command=lambda *_: _ui_auto_ring())
+    cmds.button(label="Mirror", command=lambda *_: _ui_mirror())
+    cmds.setParent("..")
+    cmds.text(label="Draw Strip needs 2+ vertices selected in order.",
+              font="smallPlainLabelFont", align="left")
+    CTRL["density"] = cmds.floatSliderGrp(
+        "qwDensity", label="Density", field=True, minValue=0.1,
+        maxValue=5.0, value=_SETTINGS["density"], precision=2,
+        changeCommand=lambda v: _ui_setting_changed("density", float(v)))
+    CTRL["sym"] = cmds.floatSliderGrp(
+        "qwSym", label="Symmetry Blend", field=True, minValue=0.0,
+        maxValue=1.0, value=_SETTINGS["symmetry_blend"], precision=2,
+        changeCommand=lambda v: _ui_setting_changed("symmetry_blend", float(v)))
+    cmds.setParent("..")
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+    cmds.frameLayout(label="Settings", collapsable=True, collapse=True,
+                     marginWidth=8)
     cmds.rowLayout(numberOfColumns=1, adjustableColumn=1)
     CTRL["preset_menu"] = cmds.optionMenuGrp("qwPreset", label="Preset",
         columnWidth2=(60, 250),
@@ -1140,29 +1365,31 @@ def show_ui():
         except Exception:  # noqa: BLE001
             pass
     cmds.setParent("..")
-    cmds.button(label="Save Current Settings",
+    cmds.button(label="Save Current Settings", height=24,
                 command=lambda *_: _ui_save_preset())
-    cmds.setParent("..")
+    CTRL["targetn"] = cmds.intFieldGrp(
+        "qwVertexTarget", label="Vertex Target", numberOfFields=1,
+        value1=_SETTINGS["vertex_target"],
+        changeCommand=lambda *_: _ui_setting_changed(
+            "vertex_target",
+            cmds.intFieldGrp("qwVertexTarget", q=True, value1=True)))
     cmds.setParent("..")
 
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
     cmds.frameLayout(label="Actions", collapsable=True, marginWidth=8)
-    cmds.rowLayout(numberOfColumns=4, columnWidth4=(90, 90, 90, 90))
-    cmds.button(label="Preview", command=lambda *_: _ui_preview())
-    cmds.button(label="Commit", command=lambda *_: _ui_commit())
-    cmds.button(label="Undo Last", command=lambda *_: _ui_undo_last())
-    cmds.button(label="Clear All", command=lambda *_: _ui_clear_all())
+    cmds.rowLayout(numberOfColumns=4, columnWidth4=(120, 120, 120, 120))
+    cmds.button(label="Preview", width=112, height=28, command=lambda *_: _ui_preview())
+    cmds.button(label="Commit", width=112, height=28, command=lambda *_: _ui_commit())
+    cmds.button(label="Undo Last", width=112, height=28, command=lambda *_: _ui_undo_last())
+    cmds.button(label="Clear All", width=112, height=28, command=lambda *_: _ui_clear_all())
     cmds.setParent("..")
     cmds.setParent("..")
 
-    cmds.frameLayout(label="Week-3 extras", collapsable=True, marginWidth=8)
-    cmds.rowLayout(numberOfColumns=2, columnWidth2=(190, 190))
-    cmds.button(label="Heat Map (deviation)",
-                command=lambda *_: _ui_heat_map())
-    cmds.button(label="Deform Test (skin)",
-                command=lambda *_: _ui_deform_test())
-    cmds.setParent("..")
-    cmds.setParent("..")
-
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
     cmds.frameLayout(label="Stats", collapsable=True, marginWidth=8)
     CTRL["stats_txt"] = cmds.text(label="poly: -   verts: -   guides: 0   non-manifold: 0",
                                  align="left")
@@ -1170,11 +1397,12 @@ def show_ui():
     cmds.setParent("..")
 
     CTRL["status_lbl"] = cmds.text(label="Ready.", align="left",
-                                  font="smallPlainLabelFont")
+                                   font="smallPlainLabelFont", wordWrap=True,
+                                   height=34)
 
     cmds.showWindow(win)
     _ui_refresh_stats()
-    _set_status("Ready. Load a target mesh to begin.")
+    _set_status("Step 1: select your sculpt, then press Load Target Mesh.")
 
 
 def _set_status(msg):
@@ -1193,9 +1421,58 @@ def _ui_load_target():
             return
         if "target_lbl" in CTRL:
             cmds.text(CTRL["target_lbl"], edit=True, label="target: " + str(tr))
-        _set_status("Target loaded: " + str(tr))
+        _set_status("Step 2: press Create Base Cage (or pick your own cage), "
+                    "then Fit to Surface.")
         _ui_refresh_stats()
         save_settings()
+    except Exception as exc:  # noqa: BLE001
+        cmds.warning("QuadWrap: {}".format(exc))
+
+
+def _ui_base_cage_changed(value):
+    try:
+        if value in BASE_CAGE_KINDS:
+            _SETTINGS["base_cage"] = value
+            save_settings()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ui_create_base_cage():
+    try:
+        kind = _SETTINGS.get("base_cage", "Prop")
+        cage = create_base_cage(kind)
+        if not cage:
+            _set_status("Could not make a base cage. Load a target mesh first.")
+            return
+        if "cage_lbl" in CTRL:
+            cmds.text(CTRL["cage_lbl"], edit=True, label="cage: " + str(cage))
+        _set_status("Made a {} base cage. Now press Fit to Surface.".format(kind))
+        _ui_refresh_stats()
+    except Exception as exc:  # noqa: BLE001
+        cmds.warning("QuadWrap: {}".format(exc))
+
+
+def _ui_use_selected_cage():
+    try:
+        sel = cmds.ls(selection=True, transforms=True) or []
+        if not sel:
+            _set_status("Nothing selected. Click a mesh in the viewport first.")
+            return
+        name = sel[0]
+        target = _CURRENT.get("target")
+        if target and name == target:
+            _set_status("That is the target, not a cage. Pick a different mesh.")
+            return
+        if _shape_of(name) is None:
+            _set_status("'{}' is not a mesh, so it cannot be a cage.".format(name))
+            return
+        _CURRENT["cage"] = name
+        _CURRENT["cage_shape"] = _shape_of(name)
+        if "cage_lbl" in CTRL:
+            cmds.text(CTRL["cage_lbl"], edit=True, label="cage: " + str(name))
+        _set_status("Cage set to '{}'. Now press Fit to Surface.".format(name))
+        _ui_refresh_stats()
     except Exception as exc:  # noqa: BLE001
         cmds.warning("QuadWrap: {}".format(exc))
 
@@ -1320,9 +1597,18 @@ def _ui_fit():
     try:
         node = fit_to_surface()
         if node:
-            _set_status("Fitted: " + str(node))
+            cage = _CURRENT.get("cage")
+            if cage and "cage_lbl" in CTRL:
+                try:
+                    cmds.text(CTRL["cage_lbl"], edit=True,
+                              label="cage: " + str(cage))
+                except Exception:  # noqa: BLE001
+                    pass
+            _set_status("Fitted '{}' to the target. Drag Projection Strength "
+                        "to adjust, then Preview and Commit.".format(cage))
         else:
-            _set_status("Fit failed (select cage; target loaded?).")
+            _set_status("Fit failed. Load a target, then Create Base Cage "
+                        "(or pick your own cage).")
         _ui_refresh_stats()
     except Exception as exc:  # noqa: BLE001
         cmds.warning("QuadWrap: {}".format(exc))
@@ -1396,6 +1682,13 @@ def _ui_refresh_stats():
             cmds.text(CTRL["stats_txt"], edit=True,
                       label="poly: {}  verts: {}  guides: {}  non-manifold: {}".format(
                           st["faces"], st["verts"], st["guides"], st["nonmanifold"]))
+        # keep the cage label honest if the cage was removed
+        cage = _CURRENT.get("cage")
+        if "cage_lbl" in CTRL and CTRL["cage_lbl"]:
+            if cage and cmds.objExists(cage):
+                cmds.text(CTRL["cage_lbl"], edit=True, label="cage: " + str(cage))
+            else:
+                cmds.text(CTRL["cage_lbl"], edit=True, label="no cage yet")
     except Exception:  # noqa: BLE001
         pass
 

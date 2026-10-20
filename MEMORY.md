@@ -117,6 +117,23 @@ Not done yet:
   with 9 CVs has 8 spans). `cmds.ls(shape + ".cv[*]")` does NOT expand
   component wildcards on a full path — it silently returns 1.
 
+## Added 2026-10-20: guided UI + base cages
+- **UI is now numbered 1-5** (Target / Cage / Fit / Check / Guide strips) with
+  a collapsible "Getting started" panel listing the three steps. Guide strips
+  and Settings are collapsed by default so the whole path fits on screen.
+- **Base cages** — `create_base_cage(kind)` builds a starting cage sized to
+  the loaded target, procedurally (no asset files):
+  Prop = subdivided cube (24 quads), Hard-Surface = chamfered box (26),
+  Human = T-pose blockout (136, real silhouette: feet 5.6 / hips 7.4 /
+  waist 6.5 / shoulders 9.7 / neck 3.8).
+- **Fit now falls back to the remembered cage**, so beginners never have to
+  re-select a mesh. "Use Selected as Cage" accepts the user's own cage.
+- `CREATED_CAGES` registry so Clear All removes generated cages.
+- **Maya gotcha:** mesh vertices have NO per-vertex translate attribute —
+  `setAttr("shape.vtx[0].tx", 1)` fails with "No object matches name".
+  Use `cmds.xform("shape.vtx[0]", t=(x,y,z))` per vertex instead.
+- `cmds.polyCube(...)` returns a LIST `['name', 'node']` — take `[0]`.
+
 ## Decisions made
 - Projection via Shrink Wrap deformer (Isaac) instead of custom code.
 - Guide strips created from selected vertex rows (not freehand drawing).
