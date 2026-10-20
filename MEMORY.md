@@ -97,6 +97,26 @@ Not done yet:
 - Fayth's numbers reproduced exactly: 7.09 → 0.00, 3.5461 at strength 0.5
   (she said 3.55), 400 faces / 382 verts / 0 non-manifold.
 
+## Fixes applied 2026-10-20 (guide strips)
+- **Mirror was a point inversion, not a mirror.** `cmds.scale(-1,1,1)` on a
+  duplicated curve transform flipped all three axes (the curve's pivot is not
+  at the origin). `mirror_guide` now builds the mirrored strip from the
+  control points directly, so X really means "flip X" and y/z are untouched.
+- **Symmetry Blend was a complete no-op** — it lerped the transform's
+  translation, and a curve's pivot sits at the origin, so the original and the
+  mirror shared the same position. It is now the amount of reflection:
+  0 = unchanged, 1 = full mirror, 0.5 = flat on the mirror plane.
+  Defaults changed 0.0 → 1.0 and `SETTINGS_VERSION = 2` migrates old
+  installs (an old stored 0 meant "full mirror").
+- **Auto-Ring count was inconsistent** between the button (`density * 4`) and
+  the API (`vertex_target / 1000`). Both now use the Density rule.
+- Guide shapes are renamed `qw_guide_NShape` — Maya reuses `curveShape1` for
+  every duplicated curve, which made any later query on it ambiguous
+  ("Only one object allowed for a query").
+- `_guide_points()` reads the CV count as `spans + degree` (a degree-1 curve
+  with 9 CVs has 8 spans). `cmds.ls(shape + ".cv[*]")` does NOT expand
+  component wildcards on a full path — it silently returns 1.
+
 ## Decisions made
 - Projection via Shrink Wrap deformer (Isaac) instead of custom code.
 - Guide strips created from selected vertex rows (not freehand drawing).

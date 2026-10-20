@@ -40,6 +40,8 @@ TOOL_NAME = "QuadWrap"
 PREFIX = "qw_"
 SETTINGS_DIR = os.path.join(os.path.expanduser("~"), ".quadwrap")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
+# Bump when a stored setting changes meaning, so load_settings can migrate it.
+SETTINGS_VERSION = 2
 
 
 CREATED_GUIDES = []      # transform names we created (guide strips / curves)
@@ -62,7 +64,7 @@ _COUNTERS = {"guide": 0, "cage": 0, "ghost": 0, "committed": 0}
 _DEFAULT_SETTINGS = {
     "projection_strength": 1.0,
     "density": 1.0,
-    "symmetry_blend": 0.0,
+    "symmetry_blend": 1.0,
     "vertex_target": 5000,
     "snap_offset": 0.0,
     "preset": "Prop",
@@ -77,7 +79,7 @@ PRESETS = {
     "Prop": {
         "projection_strength": 1.0,
         "density": 1.0,
-        "symmetry_blend": 0.0,
+        "symmetry_blend": 1.0,
         "vertex_target": 3000,
         "snap_offset": 0.0,
         "projection_mode": 4,
@@ -93,7 +95,7 @@ PRESETS = {
     "Hard-Surface": {
         "projection_strength": 0.6,
         "density": 0.9,
-        "symmetry_blend": 0.0,
+        "symmetry_blend": 1.0,
         "vertex_target": 4000,
         "snap_offset": 0.0,
         "projection_mode": 1,   # parallel-to-axes intent
@@ -183,7 +185,15 @@ def load_settings():
                 if "custom_presets" in data:
                     # keep in file only; merged into a module-level holder below
                     _CUSTOM_PRESETS.update(data.get("custom_presets", {}))
+                # Migration: Symmetry Blend used to be a no-op at both ends, so
+                # a stored 0 meant "full mirror". It now means "no mirror",
+                # so an old 0 has to become 1.
+                if int(data.get("settings_version", 1)) < 2:
+                    if not merged.get("symmetry_blend"):
+                        merged["symmetry_blend"] = 1.0
                 _SETTINGS.update(_sanitize_settings(merged))
+                if int(data.get("settings_version", 1)) < 2:
+                    save_settings()
     except Exception as exc:  # noqa: BLE001
         print("QuadWrap: could not load settings ({}), using defaults.".format(exc))
 
@@ -197,6 +207,7 @@ def save_settings():
         payload = {
             "settings": _SETTINGS,
             "custom_presets": _CUSTOM_PRESETS,
+            "settings_version": SETTINGS_VERSION,
         }
         with open(SETTINGS_FILE, "w") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
@@ -316,6 +327,14 @@ def create_strip_from_selection():
     except Exception as exc:  # noqa: BLE001
         cmds.warning("QuadWrap: curve creation failed: {}".format(exc))
         return None
+    # Give the shape a unique name. Maya reuses "curveShape1" for every
+    # duplicated curve, which makes any later query on it ambiguous.
+    try:
+        shapes = cmds.listRelatives(name, shapes=True, fullPath=True) or []
+        if shapes:
+            cmds.rename(shapes[0], name + "Shape")
+    except Exception:  # noqa: BLE001
+        pass
     CREATED_GUIDES.append(name)
     GUIDE_META[name] = {
         "source_verts": list(verts),
@@ -357,7 +376,7 @@ def auto_ring(guide=None, count=None, axis=None):
         cmds.warning("QuadWrap: select one of our guide strips to ring.")
         return 0
     count = count if count is not None else int(
-        max(2, round(_SETTINGS["vertex_target"] / 1000.0)))  # sane-ish
+        max(3, round(_SETTINGS["density"] * 4)))   # same rule as the UI button
     count = max(2, min(24, int(count)))
     if axis is None:
         axis = _SETTINGS["mirror_axis"]
@@ -402,6 +421,32 @@ def auto_ring(guide=None, count=None, axis=None):
     return made
 
 
+def _guide_points(guide):
+    """World-space control point positions of a guide strip, as a list of
+    (x, y, z) tuples. Returns None if it cannot be read."""
+    try:
+        shape = cmds.listRelatives(guide, shapes=True, fullPath=True)[0]
+        # control points = spans + degree for a nurbs curve
+        spans = int(cmds.getAttr(shape + ".spans"))
+        degree = int(cmds.getAttr(shape + ".degree"))
+        count = spans + degree
+    except Exception:  # noqa: BLE001
+        return None
+    if count < 1:
+        return None
+    pts = []
+    for i in range(count):
+        try:
+            p = cmds.xform(shape + ".cv[{}]".format(i), query=True,
+                           worldSpace=True, translation=True)
+        except Exception:  # noqa: BLE001
+            return None
+        if not p or len(p) < 3:
+            return None
+        pts.append((p[0], p[1], p[2]))
+    return pts
+
+
 def mirror_guide(guide=None, axis=None, blend=None):
     _require_maya()
     if guide is None:
@@ -413,38 +458,53 @@ def mirror_guide(guide=None, axis=None, blend=None):
     if axis is None:
         axis = _SETTINGS["mirror_axis"]
     ax = axis.upper()
-    try:
-        dup = cmds.duplicate(guide)[0]
-    except Exception as exc:  # noqa: BLE001
-        cmds.warning("QuadWrap: mirror duplicate failed: {}".format(exc))
-        return None
-    # mirror through origin on the chosen axis
-    try:
-        if ax == "X":
-            cmds.scale(-1, 1, 1, dup)
-        elif ax == "Y":
-            cmds.scale(1, -1, 1, dup)
-        else:
-            cmds.scale(1, 1, -1, dup)
-        cmds.makeIdentity(dup, apply=True, t=1, r=1, s=1, n=0)
-    except Exception as exc:  # noqa: BLE001
-        cmds.warning("QuadWrap: mirror transform failed: {}".format(exc))
-    # blend toward mirror position if requested
+
+    # How hard to mirror, 0 = leave the strip alone, 1 = full mirror.
     if blend is None:
         blend = _SETTINGS["symmetry_blend"]
-    if blend and 0 < blend < 1.0:
-        try:
-            a = cmds.xform(guide, query=True, worldSpace=True, translation=True)
-            b = cmds.xform(dup, query=True, worldSpace=True, translation=True)
-            blended = (a[0] + (b[0] - a[0]) * blend,
-                       a[1] + (b[1] - a[1]) * blend,
-                       a[2] + (b[2] - a[2]) * blend)
-            cmds.xform(dup, worldSpace=True, translation=blended)
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        blend = float(blend)
+    except (TypeError, ValueError):
+        blend = 1.0
+    blend = max(0.0, min(1.0, blend))
+
+    # Build the mirrored strip from the control points directly. Scaling a
+    # duplicated transform is unreliable here: the curve's pivot is not at the
+    # origin, so the result is not a clean reflection.
+    src = _guide_points(guide)
+    if not src:
+        cmds.warning("QuadWrap: could not read the guide's points.")
+        return None
+    mirrored = []
+    for (x, y, z) in src:
+        if ax == "X":
+            m = (-x, y, z)
+        elif ax == "Y":
+            m = (x, -y, z)
+        else:
+            m = (x, y, -z)
+        # blend straight from the original to the mirrored point
+        mirrored.append((x + (m[0] - x) * blend,
+                         y + (m[1] - y) * blend,
+                         z + (m[2] - z) * blend))
+
+    name = _unique("guide")
+    try:
+        dup = cmds.curve(point=mirrored, degree=1, name=name)
+    except Exception as exc:  # noqa: BLE001
+        cmds.warning("QuadWrap: mirror curve creation failed: {}".format(exc))
+        return None
+    try:
+        shapes = cmds.listRelatives(dup, shapes=True, fullPath=True) or []
+        if shapes:
+            cmds.rename(shapes[0], name + "Shape")
+    except Exception:  # noqa: BLE001
+        pass
     CREATED_GUIDES.append(dup)
     GUIDE_META[dup] = dict(GUIDE_META.get(guide, {}))
     GUIDE_META[dup]["mirrored"] = True
+    GUIDE_META[dup]["mirror_axis"] = ax
+    GUIDE_META[dup]["mirror_blend"] = blend
     ACTION_STACK.append("guide:" + dup)
     return dup
 
@@ -1168,9 +1228,7 @@ def _ui_auto_ring():
     try:
         sel = cmds.ls(selection=True) or []
         guide = sel[0] if sel else None
-        # simple default count from density proxy
-        n = max(3, int(round(_SETTINGS["density"] * 4)))
-        made = auto_ring(guide=guide, count=n)
+        made = auto_ring(guide=guide)
         _set_status("Auto-Ring created {} strips.".format(made))
         _ui_refresh_stats()
         save_settings()
