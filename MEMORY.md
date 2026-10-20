@@ -13,6 +13,14 @@
   only real meshes on the machine.
 - Peer-run section in that README is a DRAFT — the user must replace the
   classmate's name and the three sentences with what they actually said.
+- **Classmate: Fayth Elisa Navarro** (GitHub `absurd-absurd`,
+  repo `absurd-absurd/sva-python-scripts`, folder `MIDTERM/` — a Maya
+  "Scatter Tool", `scatter_tool.py`). Reciprocal peer run done 2026-10-19:
+  her tool ran clean and every README claim verified (copies within 0.0403 of
+  the hill vs 0.06 claimed, lean 0.000° vs 3° claimed, same seed = same
+  layout, one Ctrl+Z removes the whole scatter). Only gap found was her
+  install steps not showing the literal commands — same flaw mine had, now
+  fixed in pfa-week06.
 
 ## Verified on the real FBX assets (2026-10-19)
 - Cage max deviation from target: **7.0922 before fit → 0.0000 after fit**
